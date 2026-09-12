@@ -1,0 +1,3 @@
+build/
+signing.env
+.DS_Store
