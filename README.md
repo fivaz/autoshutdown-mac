@@ -56,13 +56,82 @@ Opening the image gives you the app next to an Applications shortcut with an arr
 | Developer ID only | Signed image, notarisation skipped with instructions printed. |
 | Neither | Unsigned image. Works locally; other Macs will warn. |
 
-`SKIP_NOTARIZE=1` signs without the round trip to Apple. `PLAIN_DMG=1` skips the Finder window styling, which is worth trying if the layout step is refused: arranging icons means scripting Finder, and macOS may ask for permission or simply decline in a headless session. The image works either way, it just opens with the default layout.
+The image carries the app's icon in two places: the mounted volume, through a `.VolumeIcon.icns` at its root, and the `.dmg` file itself, set with `tools/seticon.swift` after signing and stapling. The file icon lives in the resource fork, which survives copying and Time Machine but is stripped by most uploads and by zipping, so a `.dmg` downloaded from a web server shows the generic icon again. Nothing to be done about that; it is how the format works.
+
+`SKIP_NOTARIZE=1` signs without the round trip to Apple. `SKIP_ICON=1` leaves the generic disk image icon. `PLAIN_DMG=1` skips the Finder window styling, which is worth trying if the layout step is refused: arranging icons means scripting Finder, and macOS may ask for permission or simply decline in a headless session. The image works either way, it just opens with the default layout.
 
 Notary credentials are stored once:
 
 ```sh
 xcrun notarytool store-credentials autoshutdown-notary \
     --apple-id you@example.com --team-id TEAMID --password APP-SPECIFIC-PASSWORD
+```
+
+## Releasing
+
+There is nothing to tag and no version to bump. Push to `main` and the commit messages decide what happens, the way `semantic-release` works for npm packages.
+
+| Commits since the last release | Result |
+| --- | --- |
+| a `!` marker or a `BREAKING CHANGE` body | major, 1.4.2 becomes 2.0.0 |
+| any `feat:` | minor, 1.4.2 becomes 1.5.0 |
+| any `fix:` or `perf:` | patch, 1.4.2 becomes 1.4.3 |
+| only `docs:`, `chore:`, `refactor:`, `test:`, `style:`, `ci:` | no release |
+
+A releasable push builds, signs, notarises, creates the tag, and publishes a GitHub release with the disk image attached. A push of documentation or tidying finishes in seconds on a free Linux runner and says in the job summary why it stopped, so the expensive macOS runner only starts when there is something to ship.
+
+`tools/next-version.sh` does the arithmetic and can be run locally to see what the next push would produce:
+
+```sh
+./tools/next-version.sh
+version=1.5.0
+previous=v1.4.2
+bump=minor
+release=true
+```
+
+The tag is the source of truth for the version. `CFBundleShortVersionString` in `Info.plist` is only a placeholder for local builds; CI overwrites it before compiling, so there is no version to keep in sync by hand and no bot commit landing on `main`.
+
+### One-time setup
+
+Five repository secrets, under Settings, Secrets and variables, Actions:
+
+| Secret | Where it comes from |
+| --- | --- |
+| `DEVELOPER_ID_P12` | base64 of your exported certificate, see below |
+| `DEVELOPER_ID_P12_PASSWORD` | the password you chose when exporting |
+| `APPLE_ID` | the Apple ID holding the developer membership |
+| `APPLE_TEAM_ID` | ten characters, the part in brackets in your certificate name |
+| `APPLE_APP_PASSWORD` | app-specific password from appleid.apple.com |
+
+Exporting the certificate: open Keychain Access, find **Developer ID Application**, expand it with the triangle so both the certificate and its private key are selected, right-click, Export 2 items, save as `.p12` with a password. Then:
+
+```sh
+base64 -i certificate.p12 | pbcopy
+```
+
+and paste that as `DEVELOPER_ID_P12`. Delete the `.p12` afterwards. The private key now exists in two places, so treat the secret accordingly.
+
+### The window layout in CI
+
+GitHub's macOS runners have no desktop, so Finder cannot be scripted there and the pretty window cannot be recorded. Instead it is recorded once on your own Mac and committed:
+
+```sh
+FORCE_STYLE=1 ./make-dmg.sh     # records the layout
+git add Resources/dmg-DS_Store
+git commit -m "build: commit the disk image window layout"
+```
+
+Every later build, local or CI, reuses that file. The workflow warns in the job summary if it is missing. Note that this commit is a `build:` one, so on its own it releases nothing.
+
+### Release notes
+
+`tools/release-notes.sh` groups your conventional commits under 💥 Breaking changes, ✨ Features, 🐛 Fixes, ⚡ Performance, ♻️ Internal changes, 📝 Documentation, 📦 Build and packaging and 🧹 Housekeeping. Each line carries its scope in bold and links to the commit. Commits that follow no convention still appear, under 📋 Other, so nothing disappears quietly. Installation instructions and a compare link to the previous release are appended.
+
+Run it by hand to preview what the next release will say:
+
+```sh
+./tools/release-notes.sh HEAD v1.5.0
 ```
 
 ## Other ways in and out
