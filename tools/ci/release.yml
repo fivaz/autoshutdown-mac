@@ -1,0 +1,143 @@
+name: Release
+
+# Every push to main is considered for a release. The commit messages decide:
+# a feat gives a minor version, a fix or perf a patch, a "!" or BREAKING CHANGE a
+# major one, and a push of nothing but docs or chores releases nothing at all.
+#
+# Required repository secrets:
+#   DEVELOPER_ID_P12           base64 of the exported .p12 (certificate + key)
+#   DEVELOPER_ID_P12_PASSWORD  password used when exporting it
+#   APPLE_ID                   Apple ID that owns the developer membership
+#   APPLE_TEAM_ID              ten character team ID
+#   APPLE_APP_PASSWORD         app-specific password from appleid.apple.com
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Decide the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      previous: ${{ steps.next.outputs.previous }}
+      bump: ${{ steps.next.outputs.bump }}
+      release: ${{ steps.next.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # tags and history are the input
+
+      - id: next
+        run: bash tools/next-version.sh >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.next.outputs.release }}" = "true" ]; then
+            echo "### Releasing v${{ steps.next.outputs.version }} (${{ steps.next.outputs.bump }})" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### No release" >> "$GITHUB_STEP_SUMMARY"
+            echo "Nothing since ${{ steps.next.outputs.previous }} changes behaviour. Push a feat, fix or perf commit to cut a version." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    name: Build and publish
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # release notes need the full history
+
+      - name: Stamp the version
+        run: |
+          # The tag is the source of truth for versions. Info.plist only carries
+          # a placeholder for local builds, so it gets overwritten here.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Info.plist
+          echo "Building $VERSION"
+
+      - name: Import the signing certificate
+        env:
+          CERT_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          security default-keychain -s "$KEYCHAIN"
+
+          # Apple's intermediate, in case the runner image lacks it.
+          curl -fsS -o /tmp/DeveloperIDG2.cer \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer || true
+          [ -f /tmp/DeveloperIDG2.cer ] && \
+            security import /tmp/DeveloperIDG2.cer -k "$KEYCHAIN" -T /usr/bin/codesign || true
+
+          echo "$CERT_P12" | base64 --decode > /tmp/certificate.p12
+          security import /tmp/certificate.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f /tmp/certificate.p12
+
+          # Lets codesign use the key without an interactive prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+
+          echo "Identities available:"
+          security find-identity -v -p codesigning
+
+      - name: Store the notarisation credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials autoshutdown-notary \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+      - name: Check the window layout is committed
+        run: |
+          # There is no desktop on a runner, so the layout can only come from the
+          # committed template. Warn rather than shipping a plain image silently.
+          if [ ! -f Resources/dmg-DS_Store ]; then
+            echo "::warning::Resources/dmg-DS_Store is missing, so this image opens with the default icon layout. Run FORCE_STYLE=1 ./make-dmg.sh once on a Mac and commit the file it saves."
+          fi
+
+      - name: Build the disk image
+        run: |
+          chmod +x build.sh make-dmg.sh tools/*.sh
+          ./make-dmg.sh
+
+      - name: Generate release notes
+        run: bash tools/release-notes.sh HEAD "v$VERSION" > NOTES.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # gh creates the tag on this commit as part of publishing.
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "AutoShutdown $VERSION" \
+            --notes-file NOTES.md \
+            "build/AutoShutdown-$VERSION.dmg"
+
+      - name: Clean up the keychain
+        if: always()
+        run: security delete-keychain build.keychain || true
