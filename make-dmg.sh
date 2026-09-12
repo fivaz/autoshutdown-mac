@@ -231,9 +231,46 @@ elif ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 
     echo "          --apple-id YOU@EXAMPLE.COM --team-id TEAMID --password APP-SPECIFIC-PASSWORD"
 else
     echo "==> Notarising (this takes a few minutes)"
-    xcrun notarytool submit "$OUT" --keychain-profile "$NOTARY_PROFILE" --wait
-    xcrun stapler staple "$OUT"
-    xcrun stapler validate "$OUT"
+    SUBMIT_LOG="$BUILD/notarize.log"
+
+    set +e
+    xcrun notarytool submit "$OUT" --keychain-profile "$NOTARY_PROFILE" --wait \
+        > "$SUBMIT_LOG" 2>&1
+    SUBMIT_RC=$?
+    set -e
+    cat "$SUBMIT_LOG"
+
+    STATUS="$(sed -n 's/^ *status: *//p' "$SUBMIT_LOG" | tail -1)"
+    SUBMISSION_ID="$(sed -n 's/^ *id: *//p' "$SUBMIT_LOG" | head -1)"
+
+    if [ "$SUBMIT_RC" != "0" ] || [ "$STATUS" != "Accepted" ]; then
+        echo "!!  Notarisation did not succeed (status: ${STATUS:-unknown})."
+        [ -n "$SUBMISSION_ID" ] && \
+            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" || true
+        exit 1
+    fi
+
+    # Apple accepts the submission before the ticket is queryable, so the first
+    # staple often fails with "Record not found". Waiting is the whole fix.
+    STAPLED=0
+    for ATTEMPT in 1 2 3 4 5 6; do
+        if xcrun stapler staple "$OUT" >/dev/null 2>&1; then
+            STAPLED=1
+            break
+        fi
+        echo "    ticket not published yet, retrying in 30s ($ATTEMPT/6)"
+        sleep 30
+    done
+
+    if [ "$STAPLED" = "1" ]; then
+        xcrun stapler validate "$OUT"
+        echo "    ticket stapled"
+    else
+        echo "!!  Could not staple after three minutes."
+        echo "    The image is notarised and safe to use: Gatekeeper will check"
+        echo "    Apple online instead. To attach the ticket later, run:"
+        echo "      xcrun stapler staple \"$OUT\""
+    fi
 fi
 
 # --- Give the .dmg file itself the app's icon -------------------------------
