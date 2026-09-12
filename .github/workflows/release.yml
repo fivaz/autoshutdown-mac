@@ -154,6 +154,13 @@ jobs:
           # collaborators, so a rehearsal leaves nothing behind when deleted.
           DRAFT: ${{ inputs.dry_run && '--draft' || '' }}
         run: |
+          # Rehearsals repeat the same version until a real release moves it on,
+          # so clear the previous draft rather than failing on the collision.
+          # Guarded by DRAFT so a published release is never touched.
+          if [ -n "$DRAFT" ]; then
+            gh release delete "v$VERSION" --yes --cleanup-tag 2>/dev/null || true
+          fi
+
           # gh creates the tag on this commit as part of publishing, except for
           # drafts, where the tag is only created if the draft is published.
           # shellcheck disable=SC2086
