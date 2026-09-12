@@ -16,6 +16,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rehearsal: publish a draft release, create no tag"
+        type: boolean
+        default: true
+      skip_notarize:
+        description: "Skip the Apple round trip (faster, but proves less)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -24,6 +33,11 @@ jobs:
   version:
     name: Decide the version
     runs-on: ubuntu-latest
+    # An escape hatch for pushes that should never cut a version, such as landing
+    # this workflow itself before you have rehearsed it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.head_commit.message, '[skip release]')
     outputs:
       version: ${{ steps.next.outputs.version }}
       previous: ${{ steps.next.outputs.previous }}
@@ -35,6 +49,10 @@ jobs:
           fetch-depth: 0          # tags and history are the input
 
       - id: next
+        env:
+          # A rehearsal needs a version even when nothing since the last tag
+          # would normally warrant one.
+          FORCE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: bash tools/next-version.sh >> "$GITHUB_OUTPUT"
 
       - name: Summary
@@ -120,6 +138,8 @@ jobs:
           fi
 
       - name: Build the disk image
+        env:
+          SKIP_NOTARIZE: ${{ inputs.skip_notarize && '1' || '0' }}
         run: |
           chmod +x build.sh make-dmg.sh tools/*.sh
           ./make-dmg.sh
@@ -130,13 +150,31 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          # A draft release creates no tag and is visible only to the repository's
+          # collaborators, so a rehearsal leaves nothing behind when deleted.
+          DRAFT: ${{ inputs.dry_run && '--draft' || '' }}
         run: |
-          # gh creates the tag on this commit as part of publishing.
+          # gh creates the tag on this commit as part of publishing, except for
+          # drafts, where the tag is only created if the draft is published.
+          # shellcheck disable=SC2086
           gh release create "v$VERSION" \
             --target "$GITHUB_SHA" \
             --title "AutoShutdown $VERSION" \
             --notes-file NOTES.md \
+            $DRAFT \
             "build/AutoShutdown-$VERSION.dmg"
+
+          if [ -n "$DRAFT" ]; then
+            echo "### Rehearsal finished" >> "$GITHUB_STEP_SUMMARY"
+            echo "Draft release v$VERSION created. No tag exists yet. Inspect the notes and the .dmg, then delete the draft." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the image as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoShutdown-${{ env.VERSION }}-dmg
+          path: build/*.dmg
+          retention-days: 7
 
       - name: Clean up the keychain
         if: always()

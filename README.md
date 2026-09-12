@@ -80,6 +80,28 @@ There is nothing to tag and no version to bump. Push to `main` and the commit me
 
 A releasable push builds, signs, notarises, creates the tag, and publishes a GitHub release with the disk image attached. A push of documentation or tidying finishes in seconds on a free Linux runner and says in the job summary why it stopped, so the expensive macOS runner only starts when there is something to ship.
 
+### Rehearsing a release
+
+Nothing about the first real release should be a surprise. Two levels of dry run.
+
+**Locally, in seconds, with no network and no risk:**
+
+```sh
+./tools/next-version.sh                  # what version would this push cut?
+./tools/release-notes.sh HEAD v1.0.0     # what would the notes say?
+SKIP_NOTARIZE=1 ./make-dmg.sh            # does the image actually build?
+```
+
+**On GitHub, exercising the real thing:** Actions tab, Release workflow, Run workflow. Leave **dry_run** ticked. It runs every step for real, including importing your certificate and notarising with Apple, then publishes a **draft** release. A draft creates no tag and is visible only to you, so deleting it leaves the repository exactly as it was.
+
+Tick **skip_notarize** too if you only want to prove the build and the signing, without waiting for Apple.
+
+A rehearsal forces a patch version even when nothing since the last tag would normally warrant a release, so you always get something to look at. The finished `.dmg` is also attached to the run as a build artifact, so you can download and open it without publishing anything.
+
+What to check on the draft: the version number, the grouped notes, and that the `.dmg` opens with the background and the arrow rather than plain icons.
+
+### Version arithmetic
+
 `tools/next-version.sh` does the arithmetic and can be run locally to see what the next push would produce:
 
 ```sh

@@ -12,7 +12,12 @@
 #
 # Prints key=value lines, which is exactly the shape a GitHub Actions step output
 # wants, so CI can do: ./tools/next-version.sh >> "$GITHUB_OUTPUT"
+#
+# FORCE_RELEASE=1 turns "no release" into a patch bump. Used by rehearsal runs,
+# which need a version to build even when nothing since the last tag qualifies.
 set -euo pipefail
+
+: "${FORCE_RELEASE:=0}"
 
 LAST="$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || true)"
 
@@ -44,6 +49,10 @@ elif printf '%s\n' "$BODIES" | grep -q 'BREAKING CHANGE'; then
 elif printf '%s\n' "$SUBJECTS" | grep -qE '^feat(\([^)]+\))?:'; then
     BUMP=minor
 elif printf '%s\n' "$SUBJECTS" | grep -qE '^(fix|perf)(\([^)]+\))?:'; then
+    BUMP=patch
+fi
+
+if [ "$BUMP" = "none" ] && [ "$FORCE_RELEASE" = "1" ]; then
     BUMP=patch
 fi
 
